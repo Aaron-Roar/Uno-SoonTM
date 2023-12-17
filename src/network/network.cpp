@@ -6,81 +6,70 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-    
-#define PORT     8090
-#define MAXLINE 1024
-
-typedef enum NetToken {NETERROR, NETJOIN, NETREADY, NETSENDCARD, NETREQUESTCARD, NETLOBBY}NetToken;
-typedef enum ErrorToken {}ErrorToken;
-typedef enum UIToken {UINONE, UIREADY, UICARD, UIUNO, UINAME}UIToken;
-typedef enum CardToken {}CardToken;
-
-
-typedef struct Player {
-    char id;
-    char name[20];
-    Cards hand; //Could support multiple decks but would have to 
-                 //determine which deck for client to put card when 
-                 //recieved
-} Player;
-
-typedef struct CardTransfer {
-    Player destination;
-    Card card;
-} CardTransfer;
-
-typedef struct LobbyStatus {
-    Player players[10];
-    char ready_states[10];
-
-} LobbyStatus;
-
-typedef union Payloads {
-    CardTransfer transfer;
-    LobbyStatus lobby;
-    Player player_info;
-} Payloads;
-
-typedef struct NetMsg {
-    Player src;
-
-    NetToken token;
-    Payloads payload;
-} NetMsg;
-
+#include <sys/select.h>
 
 unsigned int addr_len = sizeof(struct sockaddr_in);
 int sockfd;
 struct sockaddr_in servaddr, clientaddr;
 
+int indexOfPlayer(Player player, LobbyStatus lobby) {
+    int i = 0;
+    while(i < max_playes) {
+        if(lobby.players[i].id == player.id) {
+            return i;
+        }
+
+        i += 1;
+    }
+
+    //Client not in the list
+    return -1;
+}
+
+NetMsg checkMsg() {
+    //Setting file descriptor
+    fd_set rfd;
+    FD_ZERO(&rfd);
+    FD_SET(sockfd, &rfd);
+
+    //Timeout 0-1 second
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
+    //Check if the fd has data ready to read
+    int ready = select(1, &rfd, NULL, NULL, &tv);
+    if(ready) {
+        //If ready read a msg
+        NetMsg srv_msg{0};
+        recvfrom(sockfd, (NetMsg*)&srv_msg, sizeof(NetMsg), MSG_WAITALL, NULL, NULL);
+        return srv_msg;
+    }
+    //Not ready return 0
+    return NetMsg{0};
+}
+
 //Client Interface
 namespace ClientBackend {
 
-    Player client;
-    LobbyStatus lobby;
+    Player client{0};
+    LobbyStatus client_lobby{0};
+
+    //Checks if server msg in buffer and returns msg if exist
     
-    void createIdentity(char* name) {
-        int i = 0;
-        while(i < 20) {
     
-            client.name[i] = name[i];
-            i += 1;
-        }
-        client.name[19] = '\0';
-    
-    }
-    
-    void updateLobby(LobbyStatus some_lobby) {
+    //Updates the clients lobby with a new lobby version
+    void updateLobby(LobbyStatus lobby) {
         int i = 0;
         while(i < 10) {
-            lobby.players[i] = some_lobby.players[i];
-            lobby.ready_states[i] = some_lobby.ready_states[i];
+            client_lobby.players[i] = lobby.players[i];
+            client_lobby.ready_states[i] = lobby.ready_states[i];
             i += 1;
         }
     }
-    
-    char joinServer() {
-        //Setting server details
+
+    //Set the clients initial networking properties
+    char setup() {
         servaddr = {0};
         servaddr.sin_family = AF_INET;
         servaddr.sin_port = htons(PORT);
@@ -92,28 +81,35 @@ namespace ClientBackend {
             perror("socket creation failed");
             exit(EXIT_FAILURE);
         }
+
+        return 1;
+    }
     
+    //Request to join the server providing a name and receiving back 
+    //an id
+    char joinServer() {
+        if(client.id != 0)
+            return client.id;
     
         //Telling server we exist and our name
-        NetMsg first_contact;
+        NetMsg first_contact{0};
         first_contact.token = NETJOIN;
         first_contact.src = client;
         sendto(sockfd, (NetMsg*)&first_contact, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&servaddr, sizeof(servaddr));
+        printf("Sent server join request\n");
     
-    
-        //Getting our assigned id from server
-        char id;
-        recvfrom(sockfd, (char*)&id, sizeof(char), MSG_WAITALL, NULL, NULL);
-        client.id = id;
-
-        NetMsg lobby_state;
+        //Server sends the lobby status and client id
+        NetMsg lobby_state = {0};
         recvfrom(sockfd, (NetMsg*)&lobby_state, sizeof(NetMsg), MSG_WAITALL, NULL, NULL);
+        printf("recieved lobby info\n");
+        client.id = lobby_state.dst.id;
         updateLobby(lobby_state.payload.lobby);
 
         return 0;
         //Make first conact and populate lobby
     }
     
+    //Tells the server the client is ready to start the game
     void readyUp() {
         NetMsg ready_msg;
         ready_msg.token = NETREADY;
@@ -123,13 +119,15 @@ namespace ClientBackend {
     
     }
     
+    //Sends a card to the server that can be asked to redirect to a 
+    //player
     char sendCard(char id, Card card) {
         int i = 0;
         while(i < max_playes) {
-            if(lobby.players[i].id == id){
+            if(client_lobby.players[i].id == id){
                 NetMsg card_to_transfer;
                 card_to_transfer.token = NETSENDCARD;
-                card_to_transfer.payload.transfer.destination = lobby.players[i];
+                card_to_transfer.payload.transfer.destination = client_lobby.players[i];
                 card_to_transfer.payload.transfer.card = card;
     
                 sendto(sockfd, (NetMsg*)&card_to_transfer, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&servaddr, sizeof(servaddr));
@@ -142,13 +140,15 @@ namespace ClientBackend {
         return 3; //Error 3 (Player to contact doesnt exist)
     }
     
+    //Asks the server for a card or redirect to ask a player for a 
+    //card
     char requestCard(char id, Card card) {
         int i = 0;
         while(i < max_playes) {
-            if(lobby.players[i].id == id){
+            if(client_lobby.players[i].id == id){
                 NetMsg card_to_transfer;
                 card_to_transfer.token = NETREQUESTCARD;
-                card_to_transfer.payload.transfer.destination = lobby.players[i];
+                card_to_transfer.payload.transfer.destination = client_lobby.players[i];
                 card_to_transfer.payload.transfer.card = card;
     
                 sendto(sockfd, (NetMsg*)&card_to_transfer, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&servaddr, sizeof(servaddr));
@@ -163,11 +163,11 @@ namespace ClientBackend {
 
 }
 
+
 namespace ServerBackend {
     //Index corrosponding lists
-    LobbyStatus lobby = {0};
+    LobbyStatus server_lobby = {0};
     struct sockaddr_in address_list[10];
-    char ready_check[10] = {0};
     
     //Connected players
     char player_count = 0;
@@ -175,12 +175,11 @@ namespace ServerBackend {
     //Configuring initial values
     unsigned int addr_size = sizeof(sockaddr_in);
     
-    //FD reference for socket
-    int sockfd;
     
     //Server Address
     Player server_identity;
 
+    //Setteing networking properties of server
     void setup() {
         //Server Address
         servaddr = {0};
@@ -204,52 +203,62 @@ namespace ServerBackend {
         }
     }
     
-    int indexOfClient(Player client) {
+    char updateClientLobbies(LobbyStatus lobby) {
+        NetMsg msg;
+        msg.token = NETLOBBY;
+        msg.src = server_identity;
+        msg.payload.lobby = lobby;
+
         int i = 0;
-        while(i < max_playes) {
-            if(lobby.players[i].id == client.id) {
-                printf("Client at index: %d, had id: %d\n", i, client.id);
-                return i;
+        while(i < 10) {
+            if(server_lobby.players[i].id != 0) {
+                msg.dst = server_lobby.players[i];
+                sendto(sockfd, (NetMsg*)&msg, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&address_list[i], sizeof(sockaddr_in));
             }
-    
             i += 1;
         }
+    }    
     
-        //Client not in the list
-        return -1;
-    }
-    
-    
+    //Adds a new client to be in the servers lobby and address tables
     Player* addClient(Player client, struct sockaddr_in cliaddr) {
+        if(client.id != 0) {
+            printf("Client already connected!!");
+            NetMsg lobby_state;
+            lobby_state.dst = client;
+            lobby_state.token = NETLOBBY;
+            lobby_state.src = server_identity;
+            lobby_state.payload.lobby = server_lobby;
+    
+            sendto(sockfd, (NetMsg*)&lobby_state, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&cliaddr, sizeof(sockaddr_in));
+            return 0;
+        }
+
         int i = 0;
         while(i < max_playes) {
     
             //Placing client info in next available location
-            if(lobby.players[i].id == 0) {
+            if(server_lobby.players[i].id == 0) {
     
                 //Copying client address information to address list
-                address_list[i].sin_family = cliaddr.sin_family;
-                address_list[i].sin_port = cliaddr.sin_port;
-                address_list[i].sin_addr = cliaddr.sin_addr;
-                printf("Clients Assigned id: %d\n", lobby.players[i].id);
+                memcpy(&address_list[i], &cliaddr, sizeof(sockaddr_in));
     
     
     
                 //Sending client their newly generated id
-                client.id = (char)(rand()%20) + 1;
-                lobby.players[i] = client;
-                sendto(sockfd, (char*)&client.id, sizeof(char), MSG_CONFIRM, (const struct sockaddr*)&cliaddr, sizeof(cliaddr));
+                client.id = (char)(rand()%253) + 1;
+                server_lobby.players[i] = client;
     
-                printf("Sending Lobby Status to client\n");
+                //Send client their id and lobby info
                 NetMsg lobby_state;
+                lobby_state.dst = server_lobby.players[i];
                 lobby_state.token = NETLOBBY;
                 lobby_state.src = server_identity;
-                lobby_state.payload.lobby = lobby;
+                lobby_state.payload.lobby = server_lobby;
     
-                sendto(sockfd, (NetMsg*)&lobby_state, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&cliaddr, sizeof(cliaddr));
+                sendto(sockfd, (NetMsg*)&lobby_state, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&cliaddr, sizeof(sockaddr_in));
     
                 player_count += 1;
-                return &lobby.players[i];
+                return &server_lobby.players[i];
             }
             i += 1;
         }
@@ -259,67 +268,47 @@ namespace ServerBackend {
     }
     
     
+    //Readies ip a client
     void readyUpClient(Player client, struct sockaddr_in cliaddr) {
-        int index = indexOfClient(client);
-        printf("Index of client: %d\n", index);
+        int index = indexOfPlayer(client, server_lobby);
     
         //Client wasnt in the list add them to the lobby
         if(index < 0) {
             addClient(client, cliaddr);
         }
-        ready_check[index] = 1;
+        server_lobby.ready_states[index] = 1;
     
     }
     
+    //Checking if all clients are ready
     char readyStatus() {
         char ready_sum = 0;
         int i = 0;
         while(i < max_playes) {
-            if(ready_check[i] != 0)
+            if(server_lobby.ready_states[i] != 0)
                 ready_sum += 1;
             i += 1;
         }
-        printf("Ready sum: %d, player count: %d\n", ready_sum, player_count);
+
         if(ready_sum >= player_count && ready_sum > 0)
             return 1;
         return 0;
     }
-    
-    char creatLobby() {
-        struct sockaddr_in cliaddr;
-        while(1) {
-            //Check if full lobby
-            if(player_count > 10)
-                return player_count;
-    
-            //All client ready begin game!!
-            if(readyStatus() == 1) {
-                printf("starting the game\n");
-                return player_count;
+
+    char broadCastMsg(NetMsg msg) {
+        msg.src = server_identity;
+        msg.token = NETLOBBY;
+
+        int i = 0;
+        while(i < 10) {
+            if(server_lobby.players[i].id != 0) {
+                msg.dst = server_lobby.players[i];
+                sendto(sockfd, (NetMsg*)&msg, sizeof(NetMsg), MSG_CONFIRM, (const struct sockaddr*)&address_list[i], sizeof(sockaddr_in));
+                printf("SentBroadCast\n");
             }
-    
-            //Take new msg from client
-            cliaddr = {0};
-            NetMsg client_msg;
-            recvfrom(sockfd, (NetMsg*)&client_msg, sizeof(NetMsg), MSG_WAITALL, (struct sockaddr*)&cliaddr, &addr_size);
-    
-            char token = client_msg.token;
-            printf("Client sent message of type: %d\n", token);
-    
-            //New client to join
-            if(token == NETJOIN) {
-                printf("Assing new client to server\n");
-                addClient(client_msg.src, cliaddr);
-            }
-    
-            //Client wants to toggle ready status
-            else if(token == NETREADY) {
-                printf("Readying up a client\n");
-                readyUpClient(client_msg.src, cliaddr);
-            }
-    
-    
+            i += 1;
         }
-    
+        return 1;
     }
+    
 }

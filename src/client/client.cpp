@@ -2,17 +2,35 @@
 const char total_cards = 100;
 const char max_playes = 10;
 //
+ #define PORT 8080
 
 #include <stdio.h>
-#include "cards.cpp"
-#include "network.cpp"
+
+#include "../cards.cpp"
+
+#include "../network/network_types.h"
+#include "../network/network.cpp"
+#include "../render/pregame.cpp"
 
 FILE* user_input_file;
+char user_input_file_name[100];
 char user_input_buffer[20];
 
 long prev_meta_state = 0;
 long current_meta_state = 0;
 
+typedef union UIPayload {
+
+    Card card;
+
+    //Data such as calling UNO or a name
+    char info[20];
+} UIPayload;
+
+typedef struct UserInput {
+    UIToken token;
+    UIPayload user_input;
+}UserInput;
 
 //Error Numbers
 //1: Players Has Too Many cards and cannot add any more!!
@@ -22,6 +40,18 @@ long current_meta_state = 0;
 
 
 ///////////////////////////////////Testing
+Card* addCard(Card card) {
+    int i = 0;
+    while(i < total_cards) {
+        if(ClientBackend::client.hand.cards[i].number == 0) {
+            ClientBackend::client.hand.cards[i] = card;
+            return &ClientBackend::client.hand.cards[i];
+        }
+        i += 1;
+    }
+    return 0;
+}
+
 Card createCard(char color, char number) {
     return (Card){
         .color = color,
@@ -52,42 +82,36 @@ void printLobby(LobbyStatus lobby) {
 }
 
 //////////////////////////////
+void createIdentity(char* name) {
+    int i = 0;
+    while(i < 20) {
 
-typedef union UIPayload {
+        if(name[i] != '\n')
+            ClientBackend::client.name[i] = name[i];
 
-    Card card;
+        i += 1;
+    }
+    ClientBackend::client.name[19] = '\0';
 
-    //Data such as calling UNO or a name
-    char info[20];
-} UIPayload;
+}
 
-typedef struct UserInput {
-    UIToken token;
-    UIPayload user_input;
-}UserInput;
 
 UserInput readUserInput() {
     memset(user_input_buffer, 0, sizeof(char)*20);
 
-    user_input_file = fopen("../client_input.txt", "r");
+    user_input_file = fopen(user_input_file_name, "r");
     fgets(user_input_buffer, 20, user_input_file);
+    fclose(user_input_file);
+
+    user_input_file = fopen(user_input_file_name, "w");
     fclose(user_input_file);
 
 
     UserInput uio;
     memset(&uio, 0, sizeof(UserInput));
 
-    if(user_input_buffer[0] == '#') {
-        //Build Card
-        uio.user_input.card = createCard(user_input_buffer[1], user_input_buffer[2]);
 
-        user_input_file = fopen("../client_input.txt", "w");
-        fclose(user_input_file);
-        memset(user_input_buffer, 0, sizeof(char)*20);
-        return uio;
-    }
-
-    else if(user_input_buffer[0] == '@') {
+    if(user_input_buffer[0] - 48 == UINAME) {
         //BuildINFO ready ect
         uio.token = UINAME;
         int i = 0;
@@ -97,14 +121,32 @@ UserInput readUserInput() {
         }
         uio.user_input.info[19] = '\0';
 
-        //Erasing file contents for next input reading
-        user_input_file = fopen("../client_input.txt", "w");
-        fclose(user_input_file);
-        memset(user_input_buffer, 0, sizeof(char)*20);
-        return uio;
     }
-
+    else if(user_input_buffer[0] - 48 == UIJOIN) {
+        uio.token = UIJOIN;
+    }
+    else if(user_input_buffer[0] - 48 == UILEAVE) {
+        uio.token = UILEAVE;
+    }
+    else if(user_input_buffer[0] - 48 == UIREADY) {
+        uio.token = UIREADY;
+    }
+    else if(user_input_buffer[0] - 48 == UITAKECARD) {
+        uio.token = UITAKECARD;
+        //BUILD CARD
+        //Provide who in input
+    }
+    else if(user_input_buffer[0] - 48 == UIGIVECARD) {
+        uio.token = UIGIVECARD;
+        //BUILD CARD
+        //Provide who in input
+    }
+    else if(user_input_buffer[0] - 48 == UIUNO) {
+        uio.token = UIUNO;
+    }
+    //Erasing file contents for next input reading
     memset(user_input_buffer, 0, sizeof(char)*20);
+
     return uio;
 
 }
@@ -131,11 +173,18 @@ char checkState(Player client) {
     return 1;
 }
 
-char update(UserInput uio) {
+char updateUIO(UserInput uio) {
     if(uio.token == UINONE) {
     }
     else if(uio.token == UINAME) {
-        ClientBackend::createIdentity(uio.user_input.info);
+        if(ClientBackend::client.id == 0)
+            createIdentity(uio.user_input.info);
+    }
+    else if(uio.token == UIJOIN) {
+        ClientBackend::joinServer();
+    }
+    else if(uio.token == UIREADY) {
+        ClientBackend::readyUp();
     }
 
     char state = checkState(ClientBackend::client);
@@ -143,39 +192,51 @@ char update(UserInput uio) {
         return 1;
     return 0;
 }
-
-int main() {
-
-    //Structure to store user input
-    UserInput uio;
-
-    while(1) {
-        //Read user input, looking for string
-        memset(&uio, 0, sizeof(UserInput));
-        uio = readUserInput();
-                
-        char state = update(uio);
-
-        if(state == 1)
-            printf("Name:%s\n", ClientBackend::client.name);
-
+char updateNetwork(NetMsg msg) {
+    if(msg.token == NETLOBBY) {
+        memcpy(&ClientBackend::client_lobby, &msg.payload.lobby, sizeof(LobbyStatus));
+        printf("Got Lobby\n");
+    }
+    else if(msg.token == NETREQUESTCARD) {
+        //RemoveCard
+        ClientBackend::sendCard(0, msg.payload.transfer.card);
+    }
+    else if(msg.token == NETSENDCARD) {
+        //AddCard
+        addCard(msg.payload.transfer.card);
     }
 
-//    ClientBackend::joinServer();
+    return 1;
+}
 
-//    //Lobby Loop
-//    while(1) {
-//        uio = readUserInput();
-//        //Check Server Msgs
-//
-//        if(uio.info[0] == NETREADY)
-//            ClientBackend::readyUp();
-//
-//        printLobby(ClientBackend::lobby);
-//    }
+char update(UserInput uio, NetMsg msg) {
+    return updateUIO(uio)||updateNetwork(msg);
+}
 
 
-//    close(sockfd);
+
+
+int main(int argc, char* argv[]) {
+    strcpy(user_input_file_name, argv[1]);
+    //Structure to store user input
+    UserInput uio;
+    ClientBackend::setup();
+
+    while(1) {
+        //Read user input
+        memset(&uio, 0, sizeof(UserInput));
+        uio = readUserInput();
+
+        //Read server input
+        NetMsg srv_msg = checkMsg();
+
+
+        //Update game state and server
+        char delta_state = update(uio, srv_msg);
+
+        Render::renderLobby(ClientBackend::client, ClientBackend::client_lobby);
+    }
+
 
     return 0;
 

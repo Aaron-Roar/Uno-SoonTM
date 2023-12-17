@@ -1,0 +1,17 @@
+Fix broadcast/address_list, or checkMsg. One or both are broken
+
+Networking
+    (Handle Leaving Server)
+    (Handle Cards)
+
+Create game engine
+DONE    (User input buffer) : User write to buffer in parallel with process
+AlmostDone    (Network | Send to server and clients) : C sockets
+DONE    (Update State | Bullet traveling through air | Hit target applied 100 dmg) : Tables
+    (Render) : HTML Canvas
+
+Uno Logic
+    (Winner)
+    (Cards)
+    (When can place)
+    (ect)
